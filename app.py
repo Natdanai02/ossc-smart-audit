@@ -572,6 +572,21 @@ with st.sidebar:
     else:
         st.warning("⚠️ สถานะ: โหมดใช้งานชั่วคราว (Offline Mode)")
         st.caption("แอปพลิเคชันเปิดทำงานได้ปกติ แต่จะไม่เซฟประวัติลงฐานข้อมูลและไม่สามารถค้นหาอัจฉริยะได้ (ตรวจสอบ secrets.toml หรือไลบรารีขาดหาย)")
+        
+        # กล่องข้อมูลดีบั๊กสำหรับวิเคราะห์หาสาเหตุบนเซิร์ฟเวอร์คลาวด์
+        with st.expander("🔍 ข้อมูลการวินิจฉัย (Debug Info)"):
+            st.write("HAS_SUPABASE:", HAS_SUPABASE)
+            st.write("HAS_POSTGRES:", HAS_POSTGRES)
+            st.write("HAS_PINECONE:", HAS_PINECONE)
+            st.write("HAS_GENAI:", HAS_GENAI)
+            st.write("HAS_TRANSFORMERS:", HAS_TRANSFORMERS)
+            try:
+                st.write("st.secrets keys:", list(st.secrets.keys()) if hasattr(st, "secrets") else "No secrets")
+                if "supabase" in st.secrets:
+                    st.write("supabase secrets key:", list(st.secrets["supabase"].keys()))
+            except Exception as se:
+                st.write("st.secrets error:", str(se))
+                
         if not (HAS_POSTGRES and HAS_PINECONE and HAS_TRANSFORMERS):
             st.info("กรุณารันติดตั้งคำสั่งเพื่อรองรับระบบฐานข้อมูล:\n`pip install -r requirements.txt` เพื่อความสมบูรณ์แบบ")
             
