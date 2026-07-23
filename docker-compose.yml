@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: audit_postgres_db
+    restart: always
+    environment:
+      POSTGRES_DB: audit_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: change-this-password-in-production # กรุณาแก้ไขรหัสก่อนใช้งานจริง
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  web:
+    build: .
+    container_name: audit_streamlit_app
+    restart: always
+    ports:
+      - "8501:8501"
+    depends_on:
+      - db
+    volumes:
+      - huggingface_cache:/app/.cache
+      # เชื่อมโยงรหัสผ่านและการเชื่อมต่อเข้ามายังตัวเว็บแอปพลิเคชันแบบอ่านอย่างเดียว
+      - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+
+volumes:
+  postgres_data:
+  huggingface_cache:
