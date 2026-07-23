@@ -92,7 +92,37 @@ def get_supabase_client():
         st.sidebar.error(f"🔌 เชื่อมต่อ Supabase API ล้มเหลว: {e}")
         return None
 
-# ฟังก์ชันดึงโมเดลแปลงเวกเตอร์ (เซฟแคชลงระบบเพื่อไม่โหลดใหม่ทุกรอบ)
+# ฟังก์ชันสร้างเวกเตอร์ (Embedding) ขนาด 384 มิติ (รองรับทั้ง Google Gemini API และ Local model)
+def get_embedding(text):
+    # 1. พยายามแปลงโดยใช้ Google Gemini API (แนะนำสำหรับคลาวด์ ประหยัดทรัพยากรและแรม)
+    if HAS_GENAI and "GEMINI_API_KEY" in st.secrets:
+        try:
+            api_key = st.secrets["GEMINI_API_KEY"]
+            client = genai.Client(api_key=api_key)
+            response = client.models.embed_content(
+                model="text-embedding-004",
+                contents=text,
+                config=types.EmbedContentConfig(
+                    output_dimensionality=384
+                )
+            )
+            if response.embeddings:
+                return response.embeddings[0].values
+        except Exception:
+            pass
+            
+    # 2. ใช้โมเดล SentenceTransformer แบบโลคอลเป็นตัวสำรอง
+    if HAS_TRANSFORMERS:
+        try:
+            model = load_embedding_model()
+            if model is not None:
+                return model.encode(text).tolist()
+        except Exception:
+            pass
+            
+    return None
+
+# ฟังก์ชันดึงโมเดลแปลงเวกเตอร์โลคอล (สำหรับ Offline Mode)
 @st.cache_resource
 def load_embedding_model():
     if not HAS_TRANSFORMERS:
@@ -103,6 +133,7 @@ def load_embedding_model():
     except Exception as e:
         st.sidebar.warning(f"⚠️ โหลดโมเดลเวกเตอร์ไม่สำเร็จ: {e}")
         return None
+
 
 # ฟังก์ชันเชื่อมต่อ PostgreSQL
 def get_postgres_connection():
@@ -292,13 +323,11 @@ def upsert_to_pinecone(audit_id, district, result_data):
         pc = Pinecone(api_key=st.secrets["pinecone"]["api_key"])
         index = pc.Index(st.secrets["pinecone"]["index_name"])
         
-        embedding_model = load_embedding_model()
-        if embedding_model is None:
-            return
-        
         report_text = result_data.get("analysis_report", "")
         # สร้าง Vector
-        vector = embedding_model.encode(report_text).tolist()
+        vector = get_embedding(report_text)
+        if vector is None:
+            return
         
         # ส่งค่าขึ้น Pinecone
         index.upsert(
@@ -331,12 +360,8 @@ def save_audit_result_to_db(district, result_data):
         client = get_supabase_client()
         if client is not None:
             try:
-                vector = None
-                if HAS_TRANSFORMERS:
-                    embedding_model = load_embedding_model()
-                    if embedding_model is not None:
-                        report_text = result_data.get("analysis_report", "")
-                        vector = embedding_model.encode(report_text).tolist()
+                report_text = result_data.get("analysis_report", "")
+                vector = get_embedding(report_text)
                 
                 payload = {
                     "district": district,
@@ -345,7 +370,7 @@ def save_audit_result_to_db(district, result_data):
                     "document_score": int(result_data.get("document_score", 0)),
                     "total_score": int(result_data.get("total_score", 0)),
                     "discrepancies": result_data.get("discrepancies", []),
-                    "analysis_report": result_data.get("analysis_report", "")
+                    "analysis_report": report_text
                 }
                 if vector is not None:
                     payload["embedding"] = vector # สามารถส่งเวกเตอร์แบบ list/array เข้า Supabase API ตรงๆ ได้เลย
@@ -364,11 +389,10 @@ def save_audit_result_to_db(district, result_data):
         has_vector = st.session_state.get("has_pgvector", False)
         try:
             vector_str = None
-            if has_vector and HAS_TRANSFORMERS:
-                embedding_model = load_embedding_model()
-                if embedding_model is not None:
-                    report_text = result_data.get("analysis_report", "")
-                    vector = embedding_model.encode(report_text).tolist()
+            if has_vector:
+                report_text = result_data.get("analysis_report", "")
+                vector = get_embedding(report_text)
+                if vector is not None:
                     vector_str = "[" + ",".join(map(str, vector)) + "]"
             
             with conn.cursor() as cur:
@@ -416,76 +440,73 @@ def save_audit_result_to_db(district, result_data):
 
 # ฟังก์ชันสืบค้นประวัติรายงานเชิงลึกจาก Supabase (pgvector) หรือ Pinecone
 def semantic_search_reports(query_text, top_k=3):
+    # 0. แปลงคำค้นเป็นเวกเตอร์
+    query_vector = get_embedding(query_text)
+    if query_vector is None:
+        return []
+        
     # 1. ค้นหาผ่าน Supabase API Client โดยเรียก RPC Function บนฐานข้อมูล
-    if IS_ONLINE_MODE and USE_SUPABASE_API and HAS_TRANSFORMERS:
+    if IS_ONLINE_MODE and USE_SUPABASE_API:
         client = get_supabase_client()
         if client is not None:
             try:
-                embedding_model = load_embedding_model()
-                if embedding_model is not None:
-                    query_vector = embedding_model.encode(query_text).tolist()
-                    
-                    res = client.rpc("match_audit_history", {
-                        "query_embedding": query_vector,
-                        "match_threshold": 0.0,
-                        "match_count": top_k
-                    }).execute()
-                    
-                    matches = []
-                    if res.data:
-                        for row in res.data:
-                            matches.append({
-                                "id": f"audit_{row['id']}",
-                                "score": float(row['similarity']) if row.get('similarity') is not None else 0.0,
-                                "metadata": {
-                                    "audit_id": row['id'],
-                                    "district": row['district'],
-                                    "total_score": row['total_score'],
-                                    "discrepancies": json.dumps(row['discrepancies']) if isinstance(row['discrepancies'], (list, dict)) else row['discrepancies'],
-                                    "analysis_report": row['analysis_report'],
-                                    "created_at": row.get('created_at', '')
-                                }
-                            })
-                        return matches
+                res = client.rpc("match_audit_history", {
+                    "query_embedding": query_vector,
+                    "match_threshold": 0.0,
+                    "match_count": top_k
+                }).execute()
+                
+                matches = []
+                if res.data:
+                    for row in res.data:
+                        matches.append({
+                            "id": f"audit_{row['id']}",
+                            "score": float(row['similarity']) if row.get('similarity') is not None else 0.0,
+                            "metadata": {
+                                "audit_id": row['id'],
+                                "district": row['district'],
+                                "total_score": row['total_score'],
+                                "discrepancies": json.dumps(row['discrepancies']) if isinstance(row['discrepancies'], (list, dict)) else row['discrepancies'],
+                                "analysis_report": row['analysis_report'],
+                                "created_at": row.get('created_at', '')
+                            }
+                        })
+                    return matches
             except Exception as e:
                 st.warning(f"⚠️ ค้นหาเวกเตอร์ผ่าน Supabase RPC ล้มเหลว (ลองใช้ Pinecone สำรอง): {e}")
                 
     # 2. ค้นหาผ่าน PostgreSQL Direct pgvector (psycopg2)
-    elif IS_ONLINE_MODE and USE_POSTGRES_DIRECT and st.session_state.get("has_pgvector", False) and HAS_TRANSFORMERS:
+    elif IS_ONLINE_MODE and USE_POSTGRES_DIRECT and st.session_state.get("has_pgvector", False):
         conn = get_postgres_connection()
         if conn is not None:
             try:
-                embedding_model = load_embedding_model()
-                if embedding_model is not None:
-                    query_vector = embedding_model.encode(query_text).tolist()
-                    vector_str = "[" + ",".join(map(str, query_vector)) + "]"
+                vector_str = "[" + ",".join(map(str, query_vector)) + "]"
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT id, district, completeness_score, accuracy_score, document_score, total_score, discrepancies, analysis_report, created_at,
+                               1 - (embedding <=> %s::vector) AS similarity
+                        FROM audit_history
+                        WHERE embedding IS NOT NULL
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s;
+                    """, (vector_str, vector_str, top_k))
                     
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            SELECT id, district, completeness_score, accuracy_score, document_score, total_score, discrepancies, analysis_report, created_at,
-                                   1 - (embedding <=> %s::vector) AS similarity
-                            FROM audit_history
-                            WHERE embedding IS NOT NULL
-                            ORDER BY embedding <=> %s::vector
-                            LIMIT %s;
-                        """, (vector_str, vector_str, top_k))
-                        
-                        rows = cur.fetchall()
-                        matches = []
-                        for row in rows:
-                            matches.append({
-                                "id": f"audit_{row[0]}",
-                                "score": float(row[9]) if row[9] is not None else 0.0,
-                                "metadata": {
+                    rows = cur.fetchall()
+                    matches = []
+                    for row in rows:
+                        matches.append({
+                            "id": f"audit_{row[0]}",
+                            "score": float(row[9]) if row[9] is not None else 0.0,
+                            "metadata": {
                                     "audit_id": row[0],
                                     "district": row[1],
                                     "total_score": row[5],
                                     "discrepancies": json.dumps(row[6]) if isinstance(row[6], (list, dict)) else row[6],
                                     "analysis_report": row[7],
                                     "created_at": row[8].strftime("%Y-%m-%d %H:%M:%S") if isinstance(row[8], datetime) else str(row[8])
-                                }
-                            })
-                        return matches
+                            }
+                        })
+                    return matches
             except Exception as e:
                 st.warning(f"⚠️ ค้นหาเวกเตอร์บน PostgreSQL ล้มเหลว (ลองใช้ Pinecone สำรอง): {e}")
             finally:
@@ -496,11 +517,6 @@ def semantic_search_reports(query_text, top_k=3):
         try:
             pc = Pinecone(api_key=st.secrets["pinecone"]["api_key"])
             index = pc.Index(st.secrets["pinecone"]["index_name"])
-            embedding_model = load_embedding_model()
-            if embedding_model is None:
-                return []
-            
-            query_vector = embedding_model.encode(query_text).tolist()
             response = index.query(vector=query_vector, top_k=top_k, include_metadata=True)
             return response.get("matches", [])
         except Exception as e:
