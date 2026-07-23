@@ -4,7 +4,22 @@ import asyncio
 import json
 import re
 from datetime import datetime
-from google.antigravity import Agent, LocalAgentConfig
+# --- ระบบการเรียกใช้ AI SDK (รองรับทั้ง Antigravity ใน IDE และ Google GenAI ในโหมดโปรดักชัน) ---
+HAS_ANTIGRAVITY = False
+try:
+    from google.antigravity import Agent, LocalAgentConfig
+    HAS_ANTIGRAVITY = True
+except ImportError:
+    pass
+
+HAS_GENAI = False
+try:
+    from google import genai
+    from google.genai import types
+    HAS_GENAI = True
+except ImportError:
+    pass
+
 
 # --- การตั้งค่าธีมและหน้าตาเว็บ (Modern & Professional) ---
 st.set_page_config(
@@ -712,16 +727,38 @@ if uploaded_file is not None and df is not None and execute_button:
         }}
         """
         
-        # 3. ฟังก์ชัน Asynchronous สำหรับเรียกใช้ Antigravity SDK
+        # 3. ฟังก์ชันสำหรับประมวลผลการวิเคราะห์ (รองรับทั้ง Antigravity และ Google GenAI)
         async def process_audit():
-            config = LocalAgentConfig(
-                system_instructions=SYSTEM_INSTRUCTION,
-                temperature=0.1  # บังคับค่าความเสถียรของตรรกะคณิตศาสตร์และบัญชี
-            )
-            async with Agent(config) as agent:
-                prompt_payload = f"ข้อมูลบัญชีประจำเดือนของ สสอ.: {district}\n\n[Data]\n{excel_data_str}"
-                response = await agent.run(prompt_payload)
+            prompt_payload = f"ข้อมูลบัญชีประจำเดือนของ สสอ.: {district}\n\n[Data]\n{excel_data_str}"
+            
+            # กรณีที่ 1: รันผ่านเครื่องโลคอลใน IDE Sandbox (มี Antigravity SDK)
+            if HAS_ANTIGRAVITY:
+                config = LocalAgentConfig(
+                    system_instructions=SYSTEM_INSTRUCTION,
+                    temperature=0.1
+                )
+                async with Agent(config) as agent:
+                    response = await agent.run(prompt_payload)
+                    return response.text
+            
+            # กรณีที่ 2: รันบนเว็บหรือเซิร์ฟเวอร์คลาวด์ภายนอก (ใช้ Google GenAI SDK และ GEMINI_API_KEY)
+            elif HAS_GENAI:
+                # ดึง API Key จาก Secrets
+                api_key = st.secrets.get("GEMINI_API_KEY")
+                client = genai.Client(api_key=api_key)
+                
+                # สั่งรันโมเดลหลักสำหรับโปรดักชัน gemini-2.5-flash แบบ Asynchronous
+                response = await client.aio.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt_payload,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        temperature=0.1
+                    )
+                )
                 return response.text
+            else:
+                raise ImportError("ไม่พบระบบจำลองสมองกล AI ในระบบ (กรุณาติดตั้งไลบรารี google-genai หรือรันในสภาพแวดล้อมที่เหมาะสม)")
 
         # 4. สั่งรันและรับผลลัพธ์
         try:
