@@ -1,8 +1,8 @@
-streamlit>=1.30.0
-pandas>=2.0.0
+streamlit>=1.60.0
+pandas>=3.0.5
 openpyxl>=3.1.5
 google-genai
-protobuf>=7.0.0
-psycopg2-binary>=2.9.0
-supabase>=2.0.0
-pinecone>=3.0.0
+protobuf>=7.35.1
+psycopg2-binary>=2.9.12
+supabase>=2.31.0
+pinecone>=9.1.0
